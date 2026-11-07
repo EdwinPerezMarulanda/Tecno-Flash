@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Tecno-Flash</string>
+    <string name="slogan">Tecnología al alcance de todos</string>
+    <string name="welcome">Bienvenido a Tecno-Flash</string>
+    <string name="login">Iniciar sesión</string>
+    <string name="email">Correo electrónico</string>
+    <string name="password">Contraseña</string>
+</resources>
