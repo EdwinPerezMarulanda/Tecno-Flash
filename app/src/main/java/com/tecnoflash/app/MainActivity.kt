@@ -8,9 +8,26 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import android.Manifest
+import android.content.pm.PackageManager
+import android.location.Location
+import androidx.core.app.ActivityCompat
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import android.content.Intent
+import android.net.Uri
 
 class MainActivity : AppCompatActivity() {
     private lateinit var root: FrameLayout
+
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+
+    private var latitud: Double? = null
+    private var longitud: Double? = null
+
+    private var metodoPagoSeleccionado = ""
     private var rol = "Comprador"
     private val preferencias by lazy {
         getSharedPreferences("tecnoflash_prefs", MODE_PRIVATE)
@@ -45,19 +62,110 @@ class MainActivity : AppCompatActivity() {
         var estado: String
     )
 
-    data class Producto(val nombre: String, val descripcion: String, val precio: Int)
+    data class Producto(
+        val nombre: String,
+        val descripcion: String,
+        val precio: Int,
+        val id: String = "",
+        val imagen: String = "prodcuto_audifonos"
+    )
+
+
+    private fun obtenerImagenProducto(nombre: String): Int {
+        return when (nombre) {
+            "producto_audifonos" -> R.drawable.producto_audifonos
+            "producto_mouse" -> R.drawable.producto_mouse
+            "producto_teclado" -> R.drawable.producto_teclado
+            "producto_parlante" -> R.drawable.producto_parlante
+            "producto_macbook" -> R.drawable.producto_macbook
+            "producto_apple_watch" -> R.drawable.producto_apple_watch
+            else -> R.drawable.producto_audifonos
+        }
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         root = findViewById(R.id.contenedorPantalla)
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         mostrarBienvenida()
+    }
+
+    private fun solicitarUbicacion() {
+
+        val permisoPreciso = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        val permisoAproximado = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+
+        if (permisoPreciso != PackageManager.PERMISSION_GRANTED &&
+            permisoAproximado != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
+                100
+            )
+            return
+        }
+
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { ubicacion: Location? ->
+
+                if (ubicacion != null) {
+                    latitud = ubicacion.latitude
+                    longitud = ubicacion.longitude
+
+                    aviso(
+                        "Ubicación obtenida correctamente: " +
+                                "$latitud, $longitud"
+                    )
+                } else {
+                    aviso("No se pudo obtener la ubicación. Activa el GPS.")
+                }
+            }
+            .addOnFailureListener {
+                aviso("Error al obtener la ubicación")
+            }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (requestCode == 100) {
+            if (grantResults.any {
+                    it == PackageManager.PERMISSION_GRANTED
+                }
+            ) {
+                solicitarUbicacion()
+            } else {
+                aviso("No se concedió el permiso de ubicación")
+            }
+        }
     }
 
     data class Usuario(
         var nombre: String,
         var correo: String,
-        var rol: String
+        var rol: String,
+        val uid: String = ""
     )
 
 
@@ -85,21 +193,84 @@ class MainActivity : AppCompatActivity() {
         val l = pantallaBase()
         encabezado(l, "Iniciar sesión")
 
-        campo(l, "Correo electrónico")
-        campo(l, "Contraseña", true)
+        val correo = campo(l, "Correo electrónico")
+        val contrasena = campo(l, "Contraseña", true)
 
         boton(l, "Ingresar") {
-            if (preferencias.getBoolean(claveBiometria, false)) {
-                entrarAlSistema()
-            } else {
-                preguntarActivarBiometria()
+
+            val email = correo.text.toString().trim()
+            val password = contrasena.text.toString()
+
+            if (email.isBlank() || password.isBlank()) {
+                aviso("Ingresa el correo y la contraseña")
+                return@boton
             }
+
+            FirebaseAuth.getInstance()
+                .signInWithEmailAndPassword(email, password)
+                .addOnCompleteListener(this) { tarea ->
+
+                    if (tarea.isSuccessful) {
+
+                        val usuarioActual = FirebaseAuth.getInstance().currentUser
+
+                        if (usuarioActual == null) {
+                            aviso("No se pudo identificar al usuario")
+                            return@addOnCompleteListener
+                        }
+
+                        FirebaseFirestore.getInstance()
+                            .collection("usuarios")
+                            .document(usuarioActual.uid)
+                            .get()
+                            .addOnSuccessListener { documento ->
+
+                                if (documento.exists()) {
+
+                                    val rolFirebase =
+                                        documento.getString("rol")
+
+                                    if (rolFirebase in listOf(
+                                            "Comprador",
+                                            "Vendedor",
+                                            "Administrador"
+                                        )
+                                    ) {
+                                        rol = rolFirebase!!
+
+                                        if (preferencias.getBoolean(
+                                                claveBiometria,
+                                                false
+                                            )
+                                        ) {
+                                            verificarBiometria(false)
+                                        } else {
+                                            preguntarActivarBiometria()
+                                        }
+
+                                    } else {
+                                        FirebaseAuth.getInstance().signOut()
+                                        aviso("El rol del usuario no es válido")
+                                    }
+
+                                } else {
+                                    FirebaseAuth.getInstance().signOut()
+                                    aviso("El usuario no tiene un perfil registrado")
+                                }
+                            }
+                            .addOnFailureListener {
+                                aviso("No se pudo consultar el perfil en Firestore")
+                            }
+
+                    } else {
+                        val error = tarea.exception?.localizedMessage
+                        aviso(error ?: "No se pudo iniciar sesión")
+                    }
+                }
         }
 
-        if (preferencias.getBoolean(claveBiometria, false)) {
-            botonSecundario(l, "Ingresar con huella digital") {
-                verificarBiometria(false)
-            }
+        botonSecundario(l, "Crear cuenta") {
+            mostrarRegistro()
         }
 
         botonSecundario(l, "¿Olvidaste tu contraseña?") {
@@ -108,6 +279,88 @@ class MainActivity : AppCompatActivity() {
 
         botonSecundario(l, "Volver") {
             mostrarBienvenida()
+        }
+    }
+
+    private fun mostrarRegistro() {
+        val l = pantallaBase()
+        encabezado(l, "Crear cuenta")
+
+        val nombre = campo(l, "Nombre completo")
+        val correo = campo(l, "Correo electrónico")
+        val password = campo(l, "Contraseña", true)
+        val confirmarPassword = campo(l, "Confirmar contraseña", true)
+
+        boton(l, "Registrarme") {
+
+            val nombreUsuario = nombre.text.toString().trim()
+            val email = correo.text.toString().trim()
+            val clave = password.text.toString()
+            val confirmar = confirmarPassword.text.toString()
+
+            if (nombreUsuario.isBlank() ||
+                email.isBlank() ||
+                clave.isBlank() ||
+                confirmar.isBlank()
+            ) {
+                aviso("Completa todos los campos")
+                return@boton
+            }
+
+            if (clave.length < 6) {
+                aviso("La contraseña debe tener mínimo 6 caracteres")
+                return@boton
+            }
+
+            if (clave != confirmar) {
+                aviso("Las contraseñas no coinciden")
+                return@boton
+            }
+
+            FirebaseAuth.getInstance()
+                .createUserWithEmailAndPassword(email, clave)
+                .addOnCompleteListener(this) { tarea ->
+
+                    if (tarea.isSuccessful) {
+
+                        val usuario = FirebaseAuth.getInstance().currentUser
+
+                        if (usuario == null) {
+                            aviso("No se pudo crear el usuario")
+                            return@addOnCompleteListener
+                        }
+
+                        val datos = hashMapOf(
+                            "nombre" to nombreUsuario,
+                            "correo" to email,
+                            "rol" to "Comprador"
+                        )
+
+                        FirebaseFirestore.getInstance()
+                            .collection("usuarios")
+                            .document(usuario.uid)
+                            .set(datos)
+                            .addOnSuccessListener {
+
+                                rol = "Comprador"
+                                aviso("Cuenta creada correctamente")
+                                mostrarInicioComprador()
+                            }
+                            .addOnFailureListener {
+                                aviso("La cuenta se creó, pero no se pudo guardar el perfil")
+                            }
+
+                    } else {
+                        aviso(
+                            tarea.exception?.localizedMessage
+                                ?: "No se pudo crear la cuenta"
+                        )
+                    }
+                }
+        }
+
+        botonSecundario(l, "Volver al inicio de sesión") {
+            mostrarLogin()
         }
     }
 
@@ -203,10 +456,29 @@ class MainActivity : AppCompatActivity() {
         val l = pantallaBase()
         encabezado(l, "Recuperar contraseña")
 
-        campo(l, "Correo electrónico")
+        val correo = campo(l, "Correo electrónico")
 
-        boton(l, "Enviar instrucciones") {
-            mostrarLogin()
+        boton(l, "Enviar enlace") {
+            val email = correo.text.toString().trim()
+
+            if (email.isBlank()) {
+                aviso("Ingresa tu correo electrónico")
+                return@boton
+            }
+
+            FirebaseAuth.getInstance()
+                .sendPasswordResetEmail(email)
+                .addOnCompleteListener(this) { tarea ->
+                    if (tarea.isSuccessful) {
+                        aviso("Revisa tu correo para restablecer la contraseña")
+                        mostrarLogin()
+                    } else {
+                        aviso(
+                            tarea.exception?.localizedMessage
+                                ?: "No se pudo enviar el enlace"
+                        )
+                    }
+                }
         }
 
         botonSecundario(l, "Volver al inicio de sesión") {
@@ -214,37 +486,127 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
     private fun mostrarInicioComprador() {
         val l = pantallaBase()
         encabezado(l, "Bienvenido a Tecno-Flash")
+
         texto(l, "Productos destacados", 16)
-        productos.take(2).forEach { tarjetaProducto(l, it, false) }
-        boton(l, "Ver productos") { mostrarProductos() }
-        botonSecundario(l, "Mi perfil") { mostrarPerfil() }
+
+        FirebaseFirestore.getInstance()
+            .collection("productos")
+            .limit(2)
+            .get()
+            .addOnSuccessListener { resultado ->
+
+                if (resultado.isEmpty) {
+                    texto(l, "No hay productos disponibles.", 15)
+                }
+
+                resultado.documents.forEach { documento ->
+
+                    val producto = Producto(
+                        nombre = documento.getString("nombre") ?: "",
+                        descripcion = documento.getString("descripcion") ?: "",
+                        precio = (documento.getLong("precio") ?: 0L).toInt(),
+                        id = documento.id,
+                        imagen = documento.getString("imagen")
+                            ?: "producto_audifonos"
+                    )
+
+                    tarjetaProducto(l, producto, false)
+                }
+            }
+            .addOnFailureListener { error ->
+                aviso("Error al cargar productos: ${error.localizedMessage}")
+            }
+
+        boton(l, "Ver productos") {
+            mostrarProductos()
+        }
+
+        botonSecundario(l, "Mi perfil") {
+            mostrarPerfil()
+        }
+
         navegacion(
             l,
             listOf("Inicio", "Productos", "Carrito", "Perfil"),
-            listOf(::mostrarInicioComprador, ::mostrarProductos, ::mostrarCarrito, ::mostrarPerfil)
+            listOf(
+                ::mostrarInicioComprador,
+                ::mostrarProductos,
+                ::mostrarCarrito,
+                ::mostrarPerfil
+            )
         )
     }
+
 
     private fun mostrarProductos() {
         val l = pantallaBase()
         encabezado(l, "Productos")
-        campo(l, "Buscar producto")
-        productos.forEach { tarjetaProducto(l, it, true) }
-        botonSecundario(l, "Volver al inicio") { mostrarInicioComprador() }
+
+        val usuario = FirebaseAuth.getInstance().currentUser
+
+        if (usuario == null) {
+            aviso("Debes iniciar sesión")
+            mostrarLogin()
+            return
+        }
+
+        FirebaseFirestore.getInstance()
+            .collection("productos")
+            .get()
+            .addOnSuccessListener { resultado ->
+
+                if (resultado.isEmpty) {
+                    texto(l, "No hay productos disponibles.", 15)
+                }
+
+                resultado.documents.forEach { documento ->
+
+                    val producto = Producto(
+                        nombre = documento.getString("nombre") ?: "",
+                        descripcion = documento.getString("descripcion") ?: "",
+                        precio = (documento.getLong("precio") ?: 0L).toInt(),
+                        id = documento.id,
+                        imagen = documento.getString("imagen")
+                            ?: "producto_audifonos"
+                    )
+
+                    tarjetaProducto(l, producto, true)
+                }
+            }
+            .addOnFailureListener { error ->
+                aviso("Error al consultar productos: ${error.localizedMessage}")
+            }
+
+        botonSecundario(l, "Volver al inicio") {
+            mostrarInicioComprador()
+        }
+
         navegacion(
             l,
             listOf("Inicio", "Productos", "Carrito", "Perfil"),
-            listOf(::mostrarInicioComprador, ::mostrarProductos, ::mostrarCarrito, ::mostrarPerfil)
+            listOf(
+                ::mostrarInicioComprador,
+                ::mostrarProductos,
+                ::mostrarCarrito,
+                ::mostrarPerfil
+            )
         )
     }
+
 
     private fun mostrarDetalle(p: Producto) {
         val l = pantallaBase()
         encabezado(l, "Detalle del producto")
-        caja(l, "Imagen del producto", 110)
+        val imagen = ImageView(this).apply {
+            setImageResource(obtenerImagenProducto(p.imagen))
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+
+        l.addView(imagen, LinearLayout.LayoutParams(-1, dp(220)))
         texto(l, p.nombre, 21)
         texto(l, p.descripcion, 14)
         texto(l, dinero(p.precio), 18)
@@ -268,6 +630,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+
     private fun mostrarPago() {
         val l = pantallaBase()
         encabezado(l, "Pago")
@@ -279,39 +642,85 @@ class MainActivity : AppCompatActivity() {
         texto(l, "Método de pago", 16)
 
         botonSecundario(l, "Tarjeta") {
+            metodoPagoSeleccionado = "Tarjeta"
             aviso("Método seleccionado: Tarjeta")
         }
 
         botonSecundario(l, "PSE") {
+            metodoPagoSeleccionado = "PSE"
             aviso("Método seleccionado: PSE")
         }
 
-        boton(l, "Confirmar compra (demostración)") {
+        botonSecundario(l, "Obtener ubicación de entrega") {
+            solicitarUbicacion()
+        }
+
+
+        boton(l, "Confirmar compra") {
+
             if (carrito.isEmpty()) {
                 aviso("El carrito está vacío")
-            } else {
-                val nombresProductos =
-                    carrito.joinToString(", ") { it.nombre }
+                return@boton
+            }
 
-                val totalCompra = carrito.sumOf { it.precio }
+            if (metodoPagoSeleccionado.isEmpty()) {
+                aviso("Selecciona un método de pago")
+                return@boton
+            }
 
-                compras.add(
-                    Compra(
-                        "Usuario de ejemplo",
-                        nombresProductos,
-                        totalCompra,
-                        "Pendiente"
+            val usuario = FirebaseAuth.getInstance().currentUser
+
+            if (latitud == null || longitud == null) {
+                aviso("Primero debes obtener tu ubicación de entrega")
+                return@boton
+            }
+
+            if (usuario == null || usuario.email.isNullOrBlank()) {
+                aviso("Debes iniciar sesión")
+                return@boton
+            }
+
+            val productosPago = carrito.map { producto ->
+                Pair(producto.id, 1)
+            }
+
+            aviso("Conectando con Mercado Pago...")
+
+            java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+
+                try {
+                    val api = MercadoPagoApi()
+
+                    val checkoutUrl = api.crearOrden(
+                        usuario.email!!,
+                        productosPago
                     )
-                )
 
-                carrito.clear()
-                aviso("Compra registrada correctamente")
-                mostrarInicioComprador()
+                    runOnUiThread {
+
+                        val intent = android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(checkoutUrl)
+                        )
+
+                        startActivity(intent)
+                    }
+
+                } catch (error: Exception) {
+
+                    runOnUiThread {
+                        aviso(
+                            "Error al iniciar el pago: ${error.localizedMessage}"
+                        )
+                    }
+                }
             }
         }
 
+
         texto(l, "Esta pantalla es una demostración. No realiza cobros.", 12)
     }
+
 
     private fun mostrarPerfil() {
         val l = pantallaBase()
@@ -319,13 +728,90 @@ class MainActivity : AppCompatActivity() {
         texto(l, "Usuario de ejemplo", 16, centrado = true)
         texto(l, "usuario@tecnoflash.com", 13, centrado = true)
         botonSecundario(l, "Editar perfil") { aviso("Edición de perfil: demostración") }
-        botonSecundario(l, "Mis compras") { aviso("Historial de compras de ejemplo") }
-        botonSecundario(l, "Cerrar sesión") { mostrarBienvenida() }
+        botonSecundario(l, "Mis compras") {
+            mostrarMisCompras()
+        }
+        botonSecundario(l, "Cerrar sesión") {
+            FirebaseAuth.getInstance().signOut()
+            rol = "Comprador"
+            carrito.clear()
+            mostrarBienvenida()
+        }
         navegacion(
             l,
             listOf("Inicio", "Productos", "Carrito", "Perfil"),
             listOf(::mostrarInicioComprador, ::mostrarProductos, ::mostrarCarrito, ::mostrarPerfil)
         )
+    }
+
+    private fun mostrarMisCompras() {
+        val l = pantallaBase()
+        encabezado(l, "Mis compras")
+
+        val usuario = FirebaseAuth.getInstance().currentUser
+
+        if (usuario == null) {
+            aviso("Debes iniciar sesión")
+            mostrarLogin()
+            return
+        }
+
+        FirebaseFirestore.getInstance()
+            .collection("ordenes")
+            .whereEqualTo("compradorUid", usuario.uid)
+            .get()
+            .addOnSuccessListener { resultado ->
+
+                if (resultado.isEmpty) {
+                    texto(l, "Todavía no tienes compras registradas.", 15)
+                }
+
+                resultado.documents.forEach { documento ->
+
+                    val total = (documento.getLong("total") ?: 0L).toInt()
+
+                    val estado = documento.getString("estado")
+                        ?: "Pendiente"
+
+                    val metodoPago = documento.getString("metodoPago")
+                        ?: "No especificado"
+
+                    val fecha = documento.getLong("fecha") ?: 0L
+
+                    val fechaTexto = if (fecha > 0) {
+                        java.text.SimpleDateFormat(
+                            "dd/MM/yyyy HH:mm",
+                            java.util.Locale.getDefault()
+                        ).format(java.util.Date(fecha))
+                    } else {
+                        "No disponible"
+                    }
+
+                    val listaProductos = documento.get("productos") as? List<*>
+
+                    val nombresProductos = listaProductos
+                        ?.mapNotNull { producto ->
+                            (producto as? Map<*, *>)?.get("nombre") as? String
+                        }
+                        ?.joinToString(", ")
+                        ?: "Sin productos"
+
+                    val fila = tarjeta(l)
+
+                    texto(fila, "Productos: $nombresProductos", 14)
+                    texto(fila, "Total: ${dinero(total)}", 15)
+                    texto(fila, "Estado: $estado", 15)
+                    texto(fila, "Método de pago: $metodoPago", 14)
+                    texto(fila, "Fecha: $fechaTexto", 13)
+                }
+            }
+            .addOnFailureListener { error ->
+                aviso("Error al consultar compras: ${error.localizedMessage}")
+            }
+
+        botonSecundario(l, "Volver al perfil") {
+            mostrarPerfil()
+        }
     }
 
     private fun mostrarInicioGestion() {
@@ -340,9 +826,7 @@ class MainActivity : AppCompatActivity() {
         if (admin) {
             boton(l, "Usuarios") { mostrarUsuarios() }
             boton(l, "Productos") {
-                mostrarLista(
-                    "Productos",
-                    productos.map { "${it.nombre} · ${dinero(it.precio)}" })
+                mostrarProductosAdmin()
             }
             boton(l, "Compras") {
                 mostrarCompras()
@@ -355,26 +839,109 @@ class MainActivity : AppCompatActivity() {
         botonSecundario(l, "Cambiar perfil") { mostrarBienvenida() }
     }
 
+
+    private fun mostrarProductosAdmin() {
+        val l = pantallaBase()
+        encabezado(l, "Administrar productos")
+
+        FirebaseFirestore.getInstance()
+            .collection("productos")
+            .get()
+            .addOnSuccessListener { resultado ->
+
+                if (resultado.isEmpty) {
+                    texto(l, "No hay productos registrados.", 15)
+                }
+
+                resultado.documents.forEach { documento ->
+
+                    val producto = Producto(
+                        nombre = documento.getString("nombre") ?: "",
+                        descripcion = documento.getString("descripcion") ?: "",
+                        precio = (documento.getLong("precio") ?: 0L).toInt(),
+                        id = documento.id,
+                        imagen = documento.getString("imagen")
+                            ?: "producto_audifonos"
+                    )
+
+                    tarjetaProducto(l, producto, false)
+                }
+            }
+            .addOnFailureListener { error ->
+                aviso("Error al consultar productos: ${error.localizedMessage}")
+            }
+
+        botonSecundario(l, "Volver") {
+            mostrarInicioGestion()
+        }
+    }
+
+
     private fun mostrarUsuarios() {
         val l = pantallaBase()
         encabezado(l, "Administrar usuarios")
 
-        usuarios.forEach { usuario ->
-            val fila = tarjeta(l)
+        FirebaseFirestore.getInstance()
+            .collection("usuarios")
+            .get()
+            .addOnSuccessListener { resultado ->
 
-            texto(fila, usuario.nombre, 16)
-            texto(fila, usuario.correo, 13)
-            texto(fila, usuario.rol, 13)
+                if (resultado.isEmpty) {
+                    texto(l, "No hay usuarios registrados.", 15)
+                }
 
-            botonPequeno(fila, "Editar") {
-                mostrarFormularioUsuario(usuario)
+                resultado.documents.forEach { documento ->
+
+                    val usuario = Usuario(
+                        nombre = documento.getString("nombre") ?: "",
+                        correo = documento.getString("correo") ?: "",
+                        rol = documento.getString("rol") ?: "",
+                        uid = documento.id
+                    )
+
+                    val fila = tarjeta(l)
+
+                    texto(fila, usuario.nombre, 16)
+                    texto(fila, usuario.correo, 13)
+                    texto(fila, usuario.rol, 13)
+
+                    botonPequeno(fila, "Editar") {
+                        mostrarFormularioUsuario(usuario)
+                    }
+
+                    botonPequeno(fila, "Eliminar") {
+                        val usuarioActual = FirebaseAuth.getInstance().currentUser
+
+                        if (usuario.uid == usuarioActual?.uid) {
+                            aviso("No puedes eliminar tu propia cuenta")
+                            return@botonPequeno
+                        }
+
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("Eliminar usuario")
+                            .setMessage("¿Deseas eliminar el perfil de ${usuario.nombre}?")
+                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton("Eliminar") { _, _ ->
+
+                                FirebaseFirestore.getInstance()
+                                    .collection("usuarios")
+                                    .document(usuario.uid)
+                                    .delete()
+                                    .addOnSuccessListener {
+                                        aviso("Perfil eliminado de Firestore")
+                                        mostrarUsuarios()
+                                    }
+                                    .addOnFailureListener { error ->
+                                        aviso("Error: ${error.localizedMessage}")
+                                    }
+                            }
+                            .show()
+                    }
+                }
             }
-
-            botonPequeno(fila, "Eliminar") {
-                usuarios.remove(usuario)
-                mostrarUsuarios()
+            .addOnFailureListener { error ->
+                aviso("Error al consultar usuarios: ${error.localizedMessage}")
             }
-        }
 
         botonSecundario(l, "Volver") {
             mostrarInicioGestion()
@@ -386,10 +953,9 @@ class MainActivity : AppCompatActivity() {
         encabezado(l, "Editar usuario")
 
         val nombre = campo(l, "Nombre completo")
-        val correo = campo(l, "Correo electrónico")
-
         nombre.setText(usuario.nombre)
-        correo.setText(usuario.correo)
+
+        texto(l, "Correo: ${usuario.correo}", 14)
 
         texto(l, "Tipo de usuario", 14)
 
@@ -407,18 +973,29 @@ class MainActivity : AppCompatActivity() {
 
         boton(l, "Guardar cambios") {
             val nuevoNombre = nombre.text.toString().trim()
-            val nuevoCorreo = correo.text.toString().trim()
+            val nuevoRol = selectorRol.selectedItem.toString()
 
-            if (nuevoNombre.isBlank() || nuevoCorreo.isBlank()) {
-                aviso("Completa todos los campos")
-            } else {
-                usuario.nombre = nuevoNombre
-                usuario.correo = nuevoCorreo
-                usuario.rol = selectorRol.selectedItem.toString()
-
-                aviso("Usuario actualizado")
-                mostrarUsuarios()
+            if (nuevoNombre.isBlank()) {
+                aviso("Ingresa el nombre del usuario")
+                return@boton
             }
+
+            FirebaseFirestore.getInstance()
+                .collection("usuarios")
+                .document(usuario.uid)
+                .update(
+                    mapOf(
+                        "nombre" to nuevoNombre,
+                        "rol" to nuevoRol
+                    )
+                )
+                .addOnSuccessListener {
+                    aviso("Usuario actualizado correctamente")
+                    mostrarUsuarios()
+                }
+                .addOnFailureListener { error ->
+                    aviso("Error al actualizar: ${error.localizedMessage}")
+                }
         }
 
         botonSecundario(l, "Cancelar") {
@@ -430,49 +1007,216 @@ class MainActivity : AppCompatActivity() {
         val l = pantallaBase()
         encabezado(l, "Administrar compras")
 
-        if (compras.isEmpty()) {
-            texto(l, "No hay compras registradas.", 15)
-        }
+        FirebaseFirestore.getInstance()
+            .collection("ordenes")
+            .get()
+            .addOnSuccessListener { resultado ->
 
-        compras.toList().forEach { compra ->
-            val fila = tarjeta(l)
-
-            texto(fila, compra.cliente, 16)
-            texto(fila, "Productos: ${compra.productos}", 14)
-            texto(fila, "Total: ${dinero(compra.total)}", 14)
-            texto(fila, "Estado: ${compra.estado}", 14)
-
-            botonPequeno(fila, "Cambiar estado") {
-                compra.estado = when (compra.estado) {
-                    "Pendiente" -> "En proceso"
-                    "En proceso" -> "Entregada"
-                    else -> "Pendiente"
+                if (resultado.isEmpty) {
+                    texto(l, "No hay compras registradas.", 15)
                 }
-                mostrarCompras()
-            }
 
-            botonPequeno(fila, "Eliminar") {
-                compras.remove(compra)
-                mostrarCompras()
+                resultado.documents.forEach { documento ->
+
+                    val correo = documento.getString("compradorCorreo")
+                        ?: "Cliente"
+
+                    val total = (documento.getLong("total") ?: 0L).toInt()
+
+                    val estado = documento.getString("estado")
+                        ?: "Pendiente"
+
+                    val metodoPago = documento.getString("metodoPago")
+                        ?: "No especificado"
+
+                    val latitud = documento.getDouble("latitud")
+                    val longitud = documento.getDouble("longitud")
+
+                    val listaProductos = documento.get("productos") as? List<*>
+
+                    val nombresProductos = listaProductos
+                        ?.mapNotNull { producto ->
+                            (producto as? Map<*, *>)?.get("nombre") as? String
+                        }
+                        ?.joinToString(", ")
+                        ?: "Sin productos"
+
+                    val fila = tarjeta(l)
+
+                    texto(fila, "Cliente: $correo", 15)
+                    texto(fila, "Productos: $nombresProductos", 14)
+                    texto(fila, "Total: ${dinero(total)}", 14)
+                    texto(fila, "Estado: $estado", 14)
+                    texto(fila, "Método de pago: $metodoPago", 14)
+
+                    if (latitud != null && longitud != null) {
+                        texto(fila, "Ubicación de entrega:", 14)
+                        texto(fila, "Latitud: $latitud", 13)
+                        texto(fila, "Longitud: $longitud", 13)
+                    } else {
+                        texto(fila, "Ubicación no registrada", 13)
+                    }
+
+                    botonPequeno(fila, "Ver ubicación en Google Maps") {
+                        if (latitud != null && longitud != null) {
+                            val uri = android.net.Uri.parse(
+                                "https://www.google.com/maps/search/?api=1&query=$latitud,$longitud"
+                            )
+
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                uri
+                            )
+
+                            startActivity(intent)
+                        } else {
+                            aviso("Este pedido no tiene ubicación registrada")
+                        }
+                    }
+
+                    botonPequeno(fila, "Cambiar estado") {
+
+                        val nuevoEstado = when (estado) {
+                            "Pendiente" -> "En proceso"
+                            "En proceso" -> "Entregada"
+                            else -> "Pendiente"
+                        }
+
+                        FirebaseFirestore.getInstance()
+                            .collection("ordenes")
+                            .document(documento.id)
+                            .update("estado", nuevoEstado)
+                            .addOnSuccessListener {
+                                aviso("Estado actualizado")
+                                mostrarCompras()
+                            }
+                            .addOnFailureListener { error ->
+                                aviso("Error: ${error.localizedMessage}")
+                            }
+                    }
+
+                    botonPequeno(fila, "Eliminar") {
+
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("Eliminar compra")
+                            .setMessage("¿Deseas eliminar este pedido?")
+                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton("Eliminar") { _, _ ->
+
+                                FirebaseFirestore.getInstance()
+                                    .collection("ordenes")
+                                    .document(documento.id)
+                                    .delete()
+                                    .addOnSuccessListener {
+                                        aviso("Compra eliminada")
+                                        mostrarCompras()
+                                    }
+                                    .addOnFailureListener { error ->
+                                        aviso("Error: ${error.localizedMessage}")
+                                    }
+                            }
+                            .show()
+                    }
+                }
             }
-        }
+            .addOnFailureListener { error ->
+                aviso("Error al consultar compras: ${error.localizedMessage}")
+            }
 
         botonSecundario(l, "Volver") {
             mostrarInicioGestion()
         }
     }
 
+
     private fun mostrarMisProductos() {
         val l = pantallaBase()
         encabezado(l, "Mis productos")
-        boton(l, "+ Registrar") { mostrarFormularioProducto(null) }
-        productos.forEach { p ->
-            val fila = tarjeta(l)
-            texto(fila, "${p.nombre} · ${dinero(p.precio)}", 15)
-            botonPequeno(fila, "Editar") { mostrarFormularioProducto(p) }
-            botonPequeno(fila, "Eliminar") { productos.remove(p); mostrarMisProductos() }
+
+        boton(l, "+ Registrar") {
+            mostrarFormularioProducto(null)
         }
-        botonSecundario(l, "Volver") { mostrarInicioGestion() }
+
+        val usuario = FirebaseAuth.getInstance().currentUser
+
+        if (usuario == null) {
+            aviso("Debes iniciar sesión")
+            mostrarLogin()
+            return
+        }
+
+        FirebaseFirestore.getInstance()
+            .collection("productos")
+            .whereEqualTo("vendedorUid", usuario.uid)
+            .get()
+            .addOnSuccessListener { resultado ->
+
+                if (resultado.isEmpty) {
+                    texto(l, "Todavía no tienes productos registrados.", 15)
+                }
+
+                resultado.documents.forEach { documento ->
+
+                    val producto = Producto(
+                        nombre = documento.getString("nombre") ?: "",
+                        descripcion = documento.getString("descripcion") ?: "",
+                        precio = (documento.getLong("precio") ?: 0L).toInt(),
+                        id = documento.id,
+                        imagen = documento.getString("imagen") ?: "producto_audifonos"
+                    )
+
+                    val fila = tarjeta(l)
+
+                    val imagen = ImageView(this).apply {
+                        setImageResource(obtenerImagenProducto(producto.imagen))
+                        scaleType = ImageView.ScaleType.CENTER_CROP
+                    }
+
+                    fila.addView(
+                        imagen,
+                        LinearLayout.LayoutParams(-1, dp(160))
+                    )
+
+                    texto(fila, producto.nombre, 16)
+                    texto(fila, producto.descripcion, 13)
+                    texto(fila, dinero(producto.precio), 15)
+
+                    botonPequeno(fila, "Editar") {
+                        mostrarFormularioProducto(producto)
+                    }
+
+
+                    botonPequeno(fila, "Eliminar") {
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("Eliminar producto")
+                            .setMessage("¿Deseas eliminar ${producto.nombre}?")
+                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton("Eliminar") { _, _ ->
+
+                                FirebaseFirestore.getInstance()
+                                    .collection("productos")
+                                    .document(producto.id)
+                                    .delete()
+                                    .addOnSuccessListener {
+                                        aviso("Producto eliminado correctamente")
+                                        mostrarMisProductos()
+                                    }
+                                    .addOnFailureListener { error ->
+                                        aviso("Error al eliminar: ${error.localizedMessage}")
+                                    }
+                            }
+                            .show()
+                    }
+
+                }
+            }
+            .addOnFailureListener { error ->
+                aviso("Error al consultar productos: ${error.localizedMessage}")
+            }
+
+        botonSecundario(l, "Volver") {
+            mostrarInicioGestion()
+        }
     }
 
     private fun mostrarFormularioProducto(producto: Producto?) {
@@ -484,16 +1228,96 @@ class MainActivity : AppCompatActivity() {
         nombre.setText(producto?.nombre ?: "")
         descripcion.setText(producto?.descripcion ?: "")
         precio.setText(producto?.precio?.toString() ?: "")
+
+        texto(l, "Imagen del producto", 14)
+
+        val imagenes = listOf(
+            "Audífonos" to "producto_audifonos",
+            "Mouse" to "producto_mouse",
+            "Teclado" to "producto_teclado",
+            "Parlante" to "producto_parlante",
+            "MacBook" to "producto_macbook",
+            "Apple Watch" to "producto_apple_watch"
+        )
+
+        val selectorImagen = Spinner(this)
+
+        selectorImagen.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            imagenes.map { it.first }
+        )
+
+        selectorImagen.setSelection(
+            imagenes.indexOfFirst { it.second == producto?.imagen }
+                .takeIf { it >= 0 } ?: 0
+        )
+
+        l.addView(selectorImagen, params())
+
         caja(l, "Seleccionar una imagen (demostración)", 70)
         boton(l, if (producto == null) "Publicar producto" else "Guardar cambios") {
-            val n = nombre.text.toString().ifBlank { "Nuevo producto" }
-            val d = descripcion.text.toString().ifBlank { "Producto tecnológico." }
-            val v = precio.text.toString().toIntOrNull() ?: 50000
-            if (producto == null) productos.add(Producto(n, d, v))
-            else {
-                val i = productos.indexOf(producto); if (i >= 0) productos[i] = Producto(n, d, v)
+            val n = nombre.text.toString().trim()
+            val d = descripcion.text.toString().trim()
+            val v = precio.text.toString().toIntOrNull()
+
+            val imagenElegida =
+                imagenes[selectorImagen.selectedItemPosition].second
+
+            if (n.isBlank() || d.isBlank() || v == null || v <= 0) {
+                aviso("Completa los campos correctamente")
+                return@boton
             }
-            aviso("Información guardada"); mostrarMisProductos()
+
+            if (producto == null) {
+                val usuario = FirebaseAuth.getInstance().currentUser
+
+                if (usuario == null) {
+                    aviso("Debes iniciar sesión")
+                    return@boton
+                }
+
+                val datos = hashMapOf(
+                    "nombre" to n,
+                    "descripcion" to d,
+                    "precio" to v,
+                    "vendedorUid" to usuario.uid,
+                    "imagen" to imagenElegida
+                )
+
+                FirebaseFirestore.getInstance()
+                    .collection("productos")
+                    .add(datos)
+                    .addOnSuccessListener {
+                        aviso("Producto registrado correctamente")
+                        mostrarMisProductos()
+                    }
+                    .addOnFailureListener { error ->
+                        aviso("Error al guardar: ${error.localizedMessage}")
+                    }
+
+
+            } else {
+                val datosActualizados = hashMapOf(
+                    "nombre" to n,
+                    "descripcion" to d,
+                    "precio" to v,
+                    "imagen" to imagenElegida
+                )
+
+                FirebaseFirestore.getInstance()
+                    .collection("productos")
+                    .document(producto.id)
+                    .update(datosActualizados as Map<String, Any>)
+                    .addOnSuccessListener {
+                        aviso("Producto actualizado correctamente")
+                        mostrarMisProductos()
+                    }
+                    .addOnFailureListener { error ->
+                        aviso("Error al actualizar: ${error.localizedMessage}")
+                    }
+            }
+
         }
         botonSecundario(l, "Cancelar") { mostrarMisProductos() }
     }
@@ -509,16 +1333,37 @@ class MainActivity : AppCompatActivity() {
         val l = pantallaBase()
         encabezado(l, "Mi perfil")
         texto(l, "$rol · usuario@tecnoflash.com", 15)
-        botonSecundario(l, "Cerrar sesión") { mostrarBienvenida() }
+        botonSecundario(l, "Cerrar sesión") {
+            FirebaseAuth.getInstance().signOut()
+            rol = "Comprador"
+            carrito.clear()
+            mostrarBienvenida()
+        }
     }
+
 
     private fun tarjetaProducto(l: LinearLayout, p: Producto, agregar: Boolean) {
         val c = tarjeta(l)
-        texto(c, "▣  ${p.nombre}", 16)
+
+        val imagen = ImageView(this).apply {
+            setImageResource(obtenerImagenProducto(p.imagen))
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+
+        c.addView(
+            imagen,
+            LinearLayout.LayoutParams(-1, dp(180))
+        )
+
+        texto(c, p.nombre, 16)
         texto(c, p.descripcion, 13)
         texto(c, dinero(p.precio), 15)
-        botonPequeno(c, if (agregar) "Ver detalle" else "Ver") { mostrarDetalle(p) }
+
+        botonPequeno(c, if (agregar) "Ver detalle" else "Ver") {
+            mostrarDetalle(p)
+        }
     }
+
 
     private fun pantallaBase(): LinearLayout {
         val scroll = ScrollView(this)

@@ -4,3 +4,6 @@ local.properties
 .DS_Store
 build/
 */build/
+
+# Configuración de Firebase
+google-services.json
